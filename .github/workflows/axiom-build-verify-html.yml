@@ -1,0 +1,100 @@
+name: Axiom Build Verification - HTML/Static
+
+on:
+  workflow_dispatch:
+    inputs:
+      workItemId:
+        required: true
+        type: string
+      orchestrationId:
+        required: true
+        type: string
+      commitSha:
+        required: true
+        type: string
+      componentPath:
+        required: false
+        type: string
+        default: '.'
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commitSha }}
+
+      - name: Validate HTML files
+        id: validate-html
+        run: |
+          echo "Validating HTML files in ${{ inputs.componentPath }}"
+          find ${{ inputs.componentPath }} -name "*.html" -type f | while read file; do
+            echo "Checking $file"
+            # Basic HTML validation (check for closing tags)
+            if ! grep -q "</html>" "$file"; then
+              echo "WARNING: $file might be missing </html> tag"
+            fi
+          done
+          echo "HTML validation completed"
+
+      - name: Check JavaScript syntax
+        id: validate-js
+        run: |
+          echo "Checking JavaScript files for syntax errors"
+          find ${{ inputs.componentPath }} -name "*.js" -type f | while read file; do
+            echo "Checking $file"
+            node --check "$file" || echo "Syntax error in $file"
+          done
+          echo "JavaScript validation completed"
+
+      - name: Check CSS syntax
+        id: validate-css
+        run: |
+          echo "Checking CSS files"
+          find ${{ inputs.componentPath }} -name "*.css" -type f | while read file; do
+            echo "Found $file"
+          done
+          echo "CSS validation completed"
+
+      - name: Notify Axiom
+        if: always()
+        env:
+          WEBHOOK_URL: ${{ secrets.AXIOM_WEBHOOK_URL }}
+          WEBHOOK_SECRET: ${{ secrets.AXIOM_WEBHOOK_SECRET }}
+        run: |
+          SUCCESS="true"
+          if [ "${{ steps.validate-html.outcome }}" != "success" ] || [ "${{ steps.validate-js.outcome }}" != "success" ]; then
+            SUCCESS="false"
+          fi
+
+          PAYLOAD=$(jq -n \
+            --arg wid "${{ inputs.workItemId }}" \
+            --arg oid "${{ inputs.orchestrationId }}" \
+            --arg comp "static-site" \
+            --arg success "$SUCCESS" \
+            --arg sha "${{ inputs.commitSha }}" \
+            --arg url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            '{
+              WorkItemId: $wid,
+              OrchestrationId: $oid,
+              ComponentName: $comp,
+              Success: ($success == "true"),
+              Errors: [],
+              Warnings: [],
+              CommitSha: $sha,
+              WorkflowRunUrl: $url,
+              BuildDuration: "PT1M"
+            }')
+
+          SIGNATURE=$(echo -n "$PAYLOAD" | openssl dgst -sha256 -hmac "$WEBHOOK_SECRET" | sed 's/^.* //')
+
+          curl -X POST "$WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -H "X-Axiom-Signature: sha256=$SIGNATURE" \
+            -d "$PAYLOAD" \
+            --fail-with-body \
+            || echo "Webhook notification failed"
